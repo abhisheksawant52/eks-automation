@@ -1,495 +1,451 @@
-#!/usr/bin/env python3
 """
-EKS Manager - A CLI tool for managing AWS EKS clusters.
+EKS Manager - A CLI tool for managing AWS Elastic Kubernetes Service clusters.
+
+Usage:
+    python eks_manager.py [COMMAND] [OPTIONS]
+
+Authentication:
+    Uses boto3 with standard AWS credential chain:
+    - Environment variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+    - AWS CLI profile (~/.aws/credentials)
+    - IAM role (when running on EC2/ECS/Lambda)
 """
 
 import json
 import logging
+import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Optional
 
 import boto3
 import click
 from botocore.exceptions import BotoCoreError, ClientError
+from dotenv import load_dotenv
 from tabulate import tabulate
 
-# Configure logging
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+
+load_dotenv()
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("eks-manager")
+
 
 # ---------------------------------------------------------------------------
-# Shared CLI options / context
+# Helpers
 # ---------------------------------------------------------------------------
 
-CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
+
+def _get_region() -> str:
+    region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+    if not region:
+        try:
+            result = subprocess.check_output(
+                ["aws", "configure", "get", "region"], stderr=subprocess.DEVNULL
+            ).decode().strip()
+            if result:
+                return result
+        except Exception:
+            pass
+        return "us-east-1"
+    return region
 
 
-def get_eks_client(region: str):
-    """Return a boto3 EKS client for the given region."""
+def _eks_client(region: str):
     return boto3.client("eks", region_name=region)
 
 
-def get_ec2_client(region: str):
-    """Return a boto3 EC2 client for the given region."""
+def _ec2_client(region: str):
     return boto3.client("ec2", region_name=region)
 
 
-def get_iam_client():
-    """Return a boto3 IAM client."""
+def _iam_client():
     return boto3.client("iam")
 
 
 # ---------------------------------------------------------------------------
-# CLI group
+# CLI definition
 # ---------------------------------------------------------------------------
 
-@click.group(context_settings=CONTEXT_SETTINGS)
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    show_default=True,
-    help="AWS region (overrides AWS_DEFAULT_REGION env var).",
-)
-@click.option("--debug", is_flag=True, default=False, help="Enable debug logging.")
-@click.pass_context
-def cli(ctx: click.Context, region: str, debug: bool):
-    """EKS Manager - Create, manage, and delete AWS EKS clusters."""
-    ctx.ensure_object(dict)
-    ctx.obj["region"] = region or "us-east-1"
-    if debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Debug mode enabled.")
+
+@click.group()
+@click.version_option("1.0.0", prog_name="eks-manager")
+def cli() -> None:
+    """EKS Manager — manage AWS Elastic Kubernetes Service clusters from the command line."""
 
 
 # ---------------------------------------------------------------------------
 # create-cluster
 # ---------------------------------------------------------------------------
 
+
 @cli.command("create-cluster")
-@click.option("--name", "-n", required=True, help="Name of the EKS cluster.")
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    help="AWS region (overrides group-level --region).",
-)
-@click.option(
-    "--node-type",
-    default="t3.medium",
-    show_default=True,
-    help="EC2 instance type for worker nodes.",
-)
-@click.option(
-    "--node-count",
-    default=2,
-    show_default=True,
-    type=click.IntRange(1, 100),
-    help="Desired number of worker nodes.",
-)
-@click.option(
-    "--k8s-version",
-    default="1.29",
-    show_default=True,
-    help="Kubernetes version for the cluster.",
-)
-@click.option(
-    "--role-arn",
-    required=True,
-    help="IAM role ARN for the EKS cluster control plane.",
-)
-@click.option(
-    "--node-role-arn",
-    required=True,
-    help="IAM role ARN for the managed node group.",
-)
-@click.option(
-    "--subnet-ids",
-    required=True,
-    multiple=True,
-    help="Subnet IDs for the cluster (pass multiple times).",
-)
-@click.option(
-    "--security-group-ids",
-    multiple=True,
-    help="Security group IDs for the cluster (pass multiple times).",
-)
-@click.pass_context
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME", help="Name of the EKS cluster.")
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION", help="AWS region.")
+@click.option("--kubernetes-version", default="1.29", show_default=True, help="Kubernetes version.")
+@click.option("--role-arn", required=True, envvar="EKS_ROLE_ARN", help="IAM role ARN for the EKS cluster.")
+@click.option("--subnet-ids", required=True, envvar="EKS_SUBNET_IDS", help="Comma-separated subnet IDs.")
+@click.option("--security-group-ids", required=True, envvar="EKS_SG_IDS", help="Comma-separated security group IDs.")
+@click.option("--endpoint-public-access/--no-endpoint-public-access", default=True, show_default=True, help="Enable public API endpoint.")
+@click.option("--endpoint-private-access/--no-endpoint-private-access", default=False, show_default=True, help="Enable private API endpoint.")
 def create_cluster(
-    ctx: click.Context,
-    name: str,
-    region: str,
-    node_type: str,
-    node_count: int,
-    k8s_version: str,
+    cluster_name: str,
+    region: Optional[str],
+    kubernetes_version: str,
     role_arn: str,
-    node_role_arn: str,
-    subnet_ids: tuple,
-    security_group_ids: tuple,
-):
-    """Create a new EKS cluster with a managed node group."""
-    effective_region = region or ctx.obj["region"]
-    eks = get_eks_client(effective_region)
+    subnet_ids: str,
+    security_group_ids: str,
+    endpoint_public_access: bool,
+    endpoint_private_access: bool,
+) -> None:
+    """Create a new EKS cluster.
 
-    click.echo(f"Creating EKS cluster '{name}' in {effective_region} ...")
-    logger.info(
-        "Cluster config: version=%s, node_type=%s, node_count=%d",
-        k8s_version,
-        node_type,
-        node_count,
-    )
+    \b
+    Example:
+        python eks_manager.py create-cluster \\
+            --cluster-name my-cluster \\
+            --role-arn arn:aws:iam::123456789:role/eks-role \\
+            --subnet-ids subnet-abc,subnet-def \\
+            --security-group-ids sg-xyz
+    """
+    region = region or _get_region()
+    eks = _eks_client(region)
 
-    resources_vpc_config: dict = {"subnetIds": list(subnet_ids)}
-    if security_group_ids:
-        resources_vpc_config["securityGroupIds"] = list(security_group_ids)
+    subnets = [s.strip() for s in subnet_ids.split(",")]
+    sgs = [s.strip() for s in security_group_ids.split(",")]
+
+    logger.info("Creating EKS cluster '%s' in region '%s'...", cluster_name, region)
 
     try:
-        # Create the cluster
         response = eks.create_cluster(
-            name=name,
-            version=k8s_version,
+            name=cluster_name,
+            version=kubernetes_version,
             roleArn=role_arn,
-            resourcesVpcConfig=resources_vpc_config,
-            tags={"ManagedBy": "eks-manager"},
-        )
-        click.echo(f"Cluster creation initiated. Status: {response['cluster']['status']}")
-
-        # Wait for cluster to become ACTIVE
-        click.echo("Waiting for cluster to become ACTIVE (this may take 10-15 minutes) ...")
-        waiter = eks.get_waiter("cluster_active")
-        waiter.wait(name=name, WaiterConfig={"Delay": 30, "MaxAttempts": 40})
-        click.secho(f"Cluster '{name}' is now ACTIVE.", fg="green")
-
-        # Create managed node group
-        click.echo(f"Creating managed node group 'default-ng' ...")
-        eks.create_nodegroup(
-            clusterName=name,
-            nodegroupName="default-ng",
-            scalingConfig={
-                "minSize": 1,
-                "maxSize": max(node_count * 2, 4),
-                "desiredSize": node_count,
+            resourcesVpcConfig={
+                "subnetIds": subnets,
+                "securityGroupIds": sgs,
+                "endpointPublicAccess": endpoint_public_access,
+                "endpointPrivateAccess": endpoint_private_access,
             },
-            instanceTypes=[node_type],
-            nodeRole=node_role_arn,
-            subnets=list(subnet_ids),
-            tags={"ManagedBy": "eks-manager"},
+            logging={
+                "clusterLogging": [
+                    {
+                        "types": ["api", "audit", "authenticator", "controllerManager", "scheduler"],
+                        "enabled": True,
+                    }
+                ]
+            },
+            tags={
+                "project": "eks-automation",
+                "managed-by": "eks-manager-cli",
+            },
         )
-
-        ng_waiter = eks.get_waiter("nodegroup_active")
-        ng_waiter.wait(
-            clusterName=name,
-            nodegroupName="default-ng",
-            WaiterConfig={"Delay": 30, "MaxAttempts": 40},
+        cluster = response["cluster"]
+        click.echo(
+            click.style(
+                f"✓ Cluster '{cluster['name']}' creation initiated. "
+                f"Status: {cluster['status']}. "
+                f"ARN: {cluster['arn']}",
+                fg="green",
+            )
         )
-        click.secho("Node group 'default-ng' is ACTIVE.", fg="green")
-
+        click.echo("Run 'eks_manager.py describe-cluster' to check provisioning status (takes ~10 minutes).")
     except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        error_msg = exc.response["Error"]["Message"]
-        logger.error("AWS ClientError [%s]: %s", error_code, error_msg)
-        raise click.ClickException(f"[{error_code}] {error_msg}") from exc
-    except BotoCoreError as exc:
-        logger.error("BotoCoreError: %s", exc)
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(f"Failed to create cluster: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
 # delete-cluster
 # ---------------------------------------------------------------------------
 
+
 @cli.command("delete-cluster")
-@click.option("--name", "-n", required=True, help="Name of the EKS cluster to delete.")
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    help="AWS region.",
-)
-@click.option(
-    "--yes",
-    "-y",
-    is_flag=True,
-    default=False,
-    help="Skip confirmation prompt.",
-)
-@click.pass_context
-def delete_cluster(ctx: click.Context, name: str, region: str, yes: bool):
-    """Delete an EKS cluster and all its managed node groups."""
-    effective_region = region or ctx.obj["region"]
-    eks = get_eks_client(effective_region)
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME", help="Name of the EKS cluster.")
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION", help="AWS region.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def delete_cluster(cluster_name: str, region: Optional[str], yes: bool) -> None:
+    """Delete an existing EKS cluster.
 
+    \b
+    Example:
+        python eks_manager.py delete-cluster --cluster-name my-cluster --yes
+    """
     if not yes:
-        click.confirm(
-            f"Are you sure you want to delete cluster '{name}' in {effective_region}? "
-            "This action is irreversible.",
-            abort=True,
-        )
+        click.confirm(f"Are you sure you want to delete cluster '{cluster_name}'?", abort=True)
+
+    region = region or _get_region()
+    eks = _eks_client(region)
+
+    logger.info("Deleting EKS cluster '%s'...", cluster_name)
 
     try:
-        # List and delete node groups first
-        ng_response = eks.list_nodegroups(clusterName=name)
-        for ng in ng_response.get("nodegroups", []):
-            click.echo(f"Deleting node group '{ng}' ...")
-            eks.delete_nodegroup(clusterName=name, nodegroupName=ng)
-            waiter = eks.get_waiter("nodegroup_deleted")
-            waiter.wait(
-                clusterName=name,
-                nodegroupName=ng,
-                WaiterConfig={"Delay": 30, "MaxAttempts": 40},
-            )
-            click.echo(f"Node group '{ng}' deleted.")
-
-        # Delete the cluster
-        click.echo(f"Deleting cluster '{name}' ...")
-        eks.delete_cluster(name=name)
-        waiter = eks.get_waiter("cluster_deleted")
-        waiter.wait(name=name, WaiterConfig={"Delay": 30, "MaxAttempts": 40})
-        click.secho(f"Cluster '{name}' has been deleted.", fg="yellow")
-
+        eks.delete_cluster(name=cluster_name)
+        click.echo(click.style(f"✓ Cluster '{cluster_name}' deletion initiated.", fg="green"))
     except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        error_msg = exc.response["Error"]["Message"]
-        logger.error("AWS ClientError [%s]: %s", error_code, error_msg)
-        raise click.ClickException(f"[{error_code}] {error_msg}") from exc
-    except BotoCoreError as exc:
-        logger.error("BotoCoreError: %s", exc)
-        raise click.ClickException(str(exc)) from exc
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            raise click.ClickException(f"Cluster '{cluster_name}' not found in region '{region}'.")
+        raise click.ClickException(f"Failed to delete cluster: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
-# update-kubeconfig
+# describe-cluster
 # ---------------------------------------------------------------------------
 
-@cli.command("update-kubeconfig")
-@click.option("--name", "-n", required=True, help="Name of the EKS cluster.")
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    help="AWS region.",
-)
-@click.option(
-    "--role-arn",
-    default=None,
-    help="IAM role ARN to assume when generating kubeconfig.",
-)
-@click.option(
-    "--kubeconfig",
-    default=None,
-    help="Path to the kubeconfig file (default: ~/.kube/config).",
-)
-@click.pass_context
-def update_kubeconfig(
-    ctx: click.Context,
-    name: str,
-    region: str,
-    role_arn: str,
-    kubeconfig: str,
-):
-    """Update local kubeconfig for kubectl access to the EKS cluster."""
-    effective_region = region or ctx.obj["region"]
 
-    cmd = [
-        "aws",
-        "eks",
-        "update-kubeconfig",
-        "--name",
-        name,
-        "--region",
-        effective_region,
-    ]
-    if role_arn:
-        cmd += ["--role-arn", role_arn]
-    if kubeconfig:
-        cmd += ["--kubeconfig", kubeconfig]
+@cli.command("describe-cluster")
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME", help="Name of the EKS cluster.")
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION", help="AWS region.")
+@click.option("--output", "-o", type=click.Choice(["table", "json"]), default="table", show_default=True)
+def describe_cluster(cluster_name: str, region: Optional[str], output: str) -> None:
+    """Show details of an EKS cluster.
 
-    click.echo(f"Running: {' '.join(cmd)}")
+    \b
+    Example:
+        python eks_manager.py describe-cluster --cluster-name my-cluster
+    """
+    region = region or _get_region()
+    eks = _eks_client(region)
+
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        click.secho(result.stdout.strip(), fg="green")
+        response = eks.describe_cluster(name=cluster_name)
+        cluster = response["cluster"]
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            raise click.ClickException(f"Cluster '{cluster_name}' not found.")
+        raise click.ClickException(f"Failed to describe cluster: {exc}") from exc
+
+    if output == "json":
+        click.echo(json.dumps(cluster, indent=2, default=str))
+    else:
+        rows = [
+            {"Field": "Name", "Value": cluster.get("name", "—")},
+            {"Field": "Status", "Value": cluster.get("status", "—")},
+            {"Field": "Kubernetes Version", "Value": cluster.get("version", "—")},
+            {"Field": "ARN", "Value": cluster.get("arn", "—")},
+            {"Field": "Endpoint", "Value": cluster.get("endpoint", "provisioning...")},
+            {"Field": "Region", "Value": region},
+            {"Field": "Role ARN", "Value": cluster.get("roleArn", "—")},
+        ]
+        click.echo(tabulate(rows, headers="keys", tablefmt="rounded_outline"))
+
+
+# ---------------------------------------------------------------------------
+# get-credentials
+# ---------------------------------------------------------------------------
+
+
+@cli.command("get-credentials")
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME", help="Name of the EKS cluster.")
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION", help="AWS region.")
+@click.option("--profile", default=None, help="AWS CLI profile to use in kubeconfig.")
+def get_credentials(cluster_name: str, region: Optional[str], profile: Optional[str]) -> None:
+    """Update kubeconfig with EKS cluster credentials.
+
+    \b
+    Example:
+        python eks_manager.py get-credentials --cluster-name my-cluster --region us-east-1
+    """
+    region = region or _get_region()
+
+    cmd = ["aws", "eks", "update-kubeconfig", "--name", cluster_name, "--region", region]
+    if profile:
+        cmd += ["--profile", profile]
+
+    logger.info("Updating kubeconfig for cluster '%s' in region '%s'...", cluster_name, region)
+
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
+        click.echo(click.style(f"✓ {output.decode().strip()}", fg="green"))
     except subprocess.CalledProcessError as exc:
-        logger.error("aws cli error: %s", exc.stderr)
-        raise click.ClickException(exc.stderr) from exc
-    except FileNotFoundError as exc:
-        raise click.ClickException(
-            "AWS CLI not found. Install it from https://aws.amazon.com/cli/"
-        ) from exc
+        raise click.ClickException(f"aws eks update-kubeconfig failed: {exc.output.decode()}") from exc
+    except FileNotFoundError:
+        raise click.ClickException("AWS CLI not found. Install it from https://aws.amazon.com/cli/")
 
 
 # ---------------------------------------------------------------------------
 # list-clusters
 # ---------------------------------------------------------------------------
 
+
 @cli.command("list-clusters")
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    help="AWS region.",
-)
-@click.option(
-    "--output",
-    "-o",
-    type=click.Choice(["table", "json"], case_sensitive=False),
-    default="table",
-    show_default=True,
-    help="Output format.",
-)
-@click.pass_context
-def list_clusters(ctx: click.Context, region: str, output: str):
-    """List all EKS clusters in the specified region."""
-    effective_region = region or ctx.obj["region"]
-    eks = get_eks_client(effective_region)
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION", help="AWS region.")
+@click.option("--output", "-o", type=click.Choice(["table", "json"]), default="table", show_default=True)
+def list_clusters(region: Optional[str], output: str) -> None:
+    """List all EKS clusters in the specified region.
+
+    \b
+    Example:
+        python eks_manager.py list-clusters --region us-east-1
+        python eks_manager.py list-clusters --output json
+    """
+    region = region or _get_region()
+    eks = _eks_client(region)
 
     try:
-        cluster_names = eks.list_clusters().get("clusters", [])
-        if not cluster_names:
-            click.echo(f"No EKS clusters found in {effective_region}.")
-            return
-
-        rows = []
-        for cname in cluster_names:
-            desc = eks.describe_cluster(name=cname)["cluster"]
-            rows.append(
-                {
-                    "Name": desc["name"],
-                    "Status": desc["status"],
-                    "Version": desc["version"],
-                    "Endpoint": desc.get("endpoint", "N/A"),
-                    "Region": effective_region,
-                    "Created": str(desc.get("createdAt", "N/A")),
-                }
-            )
-
-        if output == "json":
-            click.echo(json.dumps(rows, indent=2, default=str))
-        else:
-            click.echo(
-                tabulate(rows, headers="keys", tablefmt="rounded_outline")
-            )
-
+        names = eks.list_clusters()["clusters"]
     except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        error_msg = exc.response["Error"]["Message"]
-        logger.error("AWS ClientError [%s]: %s", error_code, error_msg)
-        raise click.ClickException(f"[{error_code}] {error_msg}") from exc
-    except BotoCoreError as exc:
-        logger.error("BotoCoreError: %s", exc)
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(f"Failed to list clusters: {exc}") from exc
+
+    if not names:
+        click.echo(f"No EKS clusters found in region '{region}'.")
+        return
+
+    if output == "json":
+        rows = []
+        for name in names:
+            try:
+                cluster = eks.describe_cluster(name=name)["cluster"]
+                rows.append({
+                    "name": cluster.get("name"),
+                    "status": cluster.get("status"),
+                    "version": cluster.get("version"),
+                    "arn": cluster.get("arn"),
+                    "endpoint": cluster.get("endpoint", "provisioning"),
+                })
+            except ClientError:
+                rows.append({"name": name, "status": "unknown"})
+        click.echo(json.dumps(rows, indent=2))
+    else:
+        rows = []
+        for name in names:
+            try:
+                cluster = eks.describe_cluster(name=name)["cluster"]
+                rows.append({
+                    "Name": cluster.get("name"),
+                    "Status": cluster.get("status"),
+                    "Version": cluster.get("version"),
+                    "Region": region,
+                })
+            except ClientError:
+                rows.append({"Name": name, "Status": "unknown", "Version": "—", "Region": region})
+        click.echo(tabulate(rows, headers="keys", tablefmt="rounded_outline"))
+
+
+# ---------------------------------------------------------------------------
+# create-nodegroup
+# ---------------------------------------------------------------------------
+
+
+@cli.command("create-nodegroup")
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME")
+@click.option("--nodegroup-name", default="nodegroup-1", show_default=True)
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION")
+@click.option("--node-role-arn", required=True, envvar="EKS_NODE_ROLE_ARN", help="IAM role ARN for node instances.")
+@click.option("--subnet-ids", required=True, envvar="EKS_SUBNET_IDS", help="Comma-separated subnet IDs.")
+@click.option("--instance-types", default="t3.medium", show_default=True, help="Comma-separated EC2 instance types.")
+@click.option("--desired-size", default=2, show_default=True, type=int)
+@click.option("--min-size", default=1, show_default=True, type=int)
+@click.option("--max-size", default=10, show_default=True, type=int)
+@click.option("--ami-type", default="AL2_x86_64", show_default=True, help="AMI type (AL2_x86_64, BOTTLEROCKET_x86_64, etc.)")
+def create_nodegroup(
+    cluster_name, nodegroup_name, region, node_role_arn, subnet_ids,
+    instance_types, desired_size, min_size, max_size, ami_type,
+) -> None:
+    """Create a managed node group for an EKS cluster.
+
+    \b
+    Example:
+        python eks_manager.py create-nodegroup \\
+            --cluster-name my-cluster \\
+            --node-role-arn arn:aws:iam::123456789:role/node-role \\
+            --subnet-ids subnet-abc,subnet-def \\
+            --desired-size 3
+    """
+    region = region or _get_region()
+    eks = _eks_client(region)
+
+    subnets = [s.strip() for s in subnet_ids.split(",")]
+    instances = [i.strip() for i in instance_types.split(",")]
+
+    logger.info("Creating node group '%s' for cluster '%s'...", nodegroup_name, cluster_name)
+
+    try:
+        response = eks.create_nodegroup(
+            clusterName=cluster_name,
+            nodegroupName=nodegroup_name,
+            scalingConfig={"minSize": min_size, "maxSize": max_size, "desiredSize": desired_size},
+            subnets=subnets,
+            instanceTypes=instances,
+            amiType=ami_type,
+            nodeRole=node_role_arn,
+            tags={"project": "eks-automation", "managed-by": "eks-manager-cli"},
+        )
+        ng = response["nodegroup"]
+        click.echo(
+            click.style(
+                f"✓ Node group '{ng['nodegroupName']}' creation initiated. "
+                f"Status: {ng['status']}",
+                fg="green",
+            )
+        )
+    except ClientError as exc:
+        raise click.ClickException(f"Failed to create node group: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
 # scale-nodegroup
 # ---------------------------------------------------------------------------
 
+
 @cli.command("scale-nodegroup")
-@click.option("--cluster", "-c", required=True, help="Name of the EKS cluster.")
-@click.option(
-    "--nodegroup",
-    "-g",
-    required=True,
-    help="Name of the managed node group to scale.",
-)
-@click.option(
-    "--desired",
-    "-d",
-    required=True,
-    type=click.IntRange(0, 1000),
-    help="Desired number of nodes.",
-)
-@click.option(
-    "--min-size",
-    default=None,
-    type=click.IntRange(0, 1000),
-    help="Minimum number of nodes (optional, updates scaling config).",
-)
-@click.option(
-    "--max-size",
-    default=None,
-    type=click.IntRange(0, 1000),
-    help="Maximum number of nodes (optional, updates scaling config).",
-)
-@click.option(
-    "--region",
-    "-r",
-    default=None,
-    envvar="AWS_DEFAULT_REGION",
-    help="AWS region.",
-)
-@click.pass_context
-def scale_nodegroup(
-    ctx: click.Context,
-    cluster: str,
-    nodegroup: str,
-    desired: int,
-    min_size: int,
-    max_size: int,
-    region: str,
-):
-    """Scale a managed node group to the desired node count."""
-    effective_region = region or ctx.obj["region"]
-    eks = get_eks_client(effective_region)
+@click.option("--cluster-name", "-n", required=True, envvar="EKS_CLUSTER_NAME")
+@click.option("--nodegroup-name", required=True, help="Name of the node group to scale.")
+@click.option("--region", "-r", default=None, envvar="AWS_DEFAULT_REGION")
+@click.option("--desired-size", required=True, type=int, help="Desired number of nodes.")
+@click.option("--min-size", default=None, type=int, help="Optional: update minimum size.")
+@click.option("--max-size", default=None, type=int, help="Optional: update maximum size.")
+def scale_nodegroup(cluster_name, nodegroup_name, region, desired_size, min_size, max_size) -> None:
+    """Scale an EKS managed node group.
+
+    \b
+    Example:
+        python eks_manager.py scale-nodegroup \\
+            --cluster-name my-cluster \\
+            --nodegroup-name nodegroup-1 \\
+            --desired-size 5
+    """
+    region = region or _get_region()
+    eks = _eks_client(region)
+
+    logger.info("Scaling node group '%s' to %d nodes...", nodegroup_name, desired_size)
 
     try:
-        # Fetch current scaling config
-        ng_desc = eks.describe_nodegroup(clusterName=cluster, nodegroupName=nodegroup)
-        current = ng_desc["nodegroup"]["scalingConfig"]
-        click.echo(
-            f"Current scaling config: min={current['minSize']}, "
-            f"max={current['maxSize']}, desired={current['desiredSize']}"
-        )
+        current = eks.describe_nodegroup(clusterName=cluster_name, nodegroupName=nodegroup_name)
+        current_scaling = current["nodegroup"]["scalingConfig"]
 
-        new_min = min_size if min_size is not None else current["minSize"]
-        new_max = max_size if max_size is not None else current["maxSize"]
-
-        # Guard rails
-        if desired < new_min:
-            raise click.ClickException(
-                f"desired ({desired}) cannot be less than minSize ({new_min})."
-            )
-        if desired > new_max:
-            raise click.ClickException(
-                f"desired ({desired}) cannot be greater than maxSize ({new_max})."
-            )
+        new_min = min_size if min_size is not None else current_scaling["minSize"]
+        new_max = max_size if max_size is not None else current_scaling["maxSize"]
 
         eks.update_nodegroup_config(
-            clusterName=cluster,
-            nodegroupName=nodegroup,
+            clusterName=cluster_name,
+            nodegroupName=nodegroup_name,
             scalingConfig={
                 "minSize": new_min,
                 "maxSize": new_max,
-                "desiredSize": desired,
+                "desiredSize": desired_size,
             },
         )
-        click.secho(
-            f"Node group '{nodegroup}' scaling update requested: "
-            f"min={new_min}, max={new_max}, desired={desired}",
-            fg="green",
+        click.echo(
+            click.style(
+                f"✓ Node group '{nodegroup_name}' scaling to {desired_size} nodes initiated.",
+                fg="green",
+            )
         )
-
     except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        error_msg = exc.response["Error"]["Message"]
-        logger.error("AWS ClientError [%s]: %s", error_code, error_msg)
-        raise click.ClickException(f"[{error_code}] {error_msg}") from exc
-    except BotoCoreError as exc:
-        logger.error("BotoCoreError: %s", exc)
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(f"Failed to scale node group: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    cli(obj={})
+    cli()
