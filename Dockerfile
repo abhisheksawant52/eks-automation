@@ -1,5 +1,5 @@
 # Slim single-stage image packaging the eks-automation CLI.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # Do not write .pyc files; flush stdout/stderr immediately.
 ENV PYTHONDONTWRITEBYTECODE=1 \
