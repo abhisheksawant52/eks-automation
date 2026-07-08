@@ -1,0 +1,26 @@
+# Production environment values.
+# Usage:
+#   terraform -chdir=terraform init -backend-config=environments/prod/backend.hcl
+#   terraform -chdir=terraform apply -var-file=environments/prod/prod.tfvars
+
+region             = "us-east-1"
+cluster_name       = "eks-automation-prod"
+kubernetes_version = "1.30"
+
+vpc_cidr     = "10.20.0.0/16"
+subnet_count = 3
+
+instance_types = ["m5.large"]
+desired_size   = 3
+min_size       = 3
+max_size       = 12
+
+# Restrict the public endpoint in production; enable private access.
+endpoint_public_access  = true
+endpoint_private_access = true
+
+tags = {
+  project     = "eks-automation"
+  managed_by  = "terraform"
+  environment = "prod"
+}

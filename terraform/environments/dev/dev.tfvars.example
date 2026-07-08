@@ -1,0 +1,25 @@
+# Development environment values.
+# Usage:
+#   terraform -chdir=terraform init -backend-config=environments/dev/backend.hcl
+#   terraform -chdir=terraform apply -var-file=environments/dev/dev.tfvars
+
+region             = "us-east-1"
+cluster_name       = "eks-automation-dev"
+kubernetes_version = "1.30"
+
+vpc_cidr     = "10.10.0.0/16"
+subnet_count = 2
+
+instance_types = ["t3.medium"]
+desired_size   = 2
+min_size       = 1
+max_size       = 4
+
+endpoint_public_access  = true
+endpoint_private_access = false
+
+tags = {
+  project     = "eks-automation"
+  managed_by  = "terraform"
+  environment = "dev"
+}

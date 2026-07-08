@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# Ignore all tfvars (may contain secrets) except the checked-in examples
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+# Keep the lock file so builds are reproducible
+!.terraform.lock.hcl
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

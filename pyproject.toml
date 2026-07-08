@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eks-automation"
+version = "0.1.0"
+description = "boto3-based CLI and Terraform infrastructure for provisioning and managing AWS EKS clusters"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Abhishek Sawant" }]
+keywords = ["aws", "eks", "kubernetes", "boto3", "terraform", "devops", "automation"]
+dependencies = [
+  "boto3>=1.34",
+  "click>=8.1",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "python-dotenv>=1.0",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5", "black>=24.0", "pre-commit>=3.7"]
+
+[project.scripts]
+eks-automation = "eks_automation.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/abhisheksawant52/eks-automation"
+Issues = "https://github.com/abhisheksawant52/eks-automation/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src"]

@@ -1,55 +1,55 @@
 output "cluster_name" {
   description = "Name of the EKS cluster."
-  value       = aws_eks_cluster.main.name
+  value       = module.eks.cluster_name
 }
 
 output "cluster_arn" {
   description = "ARN of the EKS cluster."
-  value       = aws_eks_cluster.main.arn
+  value       = module.eks.cluster_arn
 }
 
 output "cluster_endpoint" {
   description = "Endpoint of the Kubernetes API server."
-  value       = aws_eks_cluster.main.endpoint
+  value       = module.eks.cluster_endpoint
 }
 
 output "cluster_version" {
   description = "Kubernetes version of the cluster."
-  value       = aws_eks_cluster.main.version
+  value       = module.eks.cluster_version
 }
 
 output "cluster_security_group_id" {
-  description = "Security group ID attached to the EKS cluster."
-  value       = aws_eks_cluster.main.vpc_config[0].cluster_security_group_id
-}
-
-output "vpc_id" {
-  description = "VPC ID where the cluster is deployed."
-  value       = aws_vpc.eks.id
-}
-
-output "subnet_ids" {
-  description = "Public subnet IDs used by the cluster."
-  value       = aws_subnet.public[*].id
+  description = "Security group ID managed by the EKS control plane."
+  value       = module.eks.cluster_security_group_id
 }
 
 output "cluster_certificate_authority" {
   description = "Base64-encoded certificate authority data."
-  value       = aws_eks_cluster.main.certificate_authority[0].data
+  value       = module.eks.cluster_certificate_authority
   sensitive   = true
 }
 
 output "cluster_role_arn" {
-  description = "IAM role ARN of the EKS cluster."
-  value       = aws_iam_role.eks_cluster.arn
+  description = "IAM role ARN of the EKS control plane."
+  value       = module.eks.cluster_role_arn
 }
 
 output "node_role_arn" {
-  description = "IAM role ARN of the EKS node group."
-  value       = aws_iam_role.eks_node.arn
+  description = "IAM role ARN of the managed node group."
+  value       = module.eks.node_role_arn
+}
+
+output "vpc_id" {
+  description = "VPC ID where the cluster is deployed."
+  value       = module.vpc.vpc_id
+}
+
+output "subnet_ids" {
+  description = "Public subnet IDs used by the cluster."
+  value       = module.vpc.public_subnet_ids
 }
 
 output "kubeconfig_command" {
   description = "AWS CLI command to update kubeconfig."
-  value       = "aws eks update-kubeconfig --name ${aws_eks_cluster.main.name} --region ${var.region}"
+  value       = "aws eks update-kubeconfig --name ${module.eks.cluster_name} --region ${var.region}"
 }

@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (git-ignored) and adjust for your environment.
+
+region             = "us-east-1"
+aws_profile        = ""
+cluster_name       = "eks-automation-cluster"
+kubernetes_version = "1.30"
+
+vpc_cidr     = "10.0.0.0/16"
+subnet_count = 2
+
+instance_types = ["t3.medium"]
+ami_type       = "AL2023_x86_64_STANDARD"
+desired_size   = 2
+min_size       = 1
+max_size       = 10
+
+endpoint_public_access  = true
+endpoint_private_access = false
+
+tags = {
+  project     = "eks-automation"
+  managed_by  = "terraform"
+  environment = "dev"
+}
